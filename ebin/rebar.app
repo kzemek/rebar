@@ -11,6 +11,7 @@
               rebar_asn1_compiler,
               rebar_dia_compiler,
               rebar_base_compiler,
+              rebar_beam_cache,
               rebar_cleaner,
               rebar_config,
               rebar_core,

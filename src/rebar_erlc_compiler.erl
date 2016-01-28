@@ -529,7 +529,7 @@ expand_file_names(Files, Dirs) ->
 internal_erl_compile(Config, Source, OutDir, ErlOpts) ->
     ok = filelib:ensure_dir(OutDir),
     Opts = [{outdir, OutDir}] ++ ErlOpts ++ [{i, "include"}, return],
-    case compile:file(Source, Opts) of
+    case rebar_beam_cache:compile(Source, Opts) of
         {ok, _Mod} ->
             ok;
         {ok, _Mod, Ws} ->
