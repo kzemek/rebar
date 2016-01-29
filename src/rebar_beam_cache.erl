@@ -14,16 +14,8 @@ compile(File, Options, false = _CacheDir) ->
     compile:file(File, Options);
 
 compile(File, Options, CacheDir) ->
-    FilteredOptions = lists:filter(fun
-        (report_errors) -> false;
-        (report_warnings) -> false;
-        (report) -> false;
-        (return_warnings) -> false;
-        (verbose) -> false;
-        ({outdir, _}) -> false;
-        ({warn_format, _}) -> false;
-        (_) -> true
-    end, Options),
+    FilteredOptions =
+        lists:filter(fun({outdir, _}) -> false; (_) -> true end, Options),
 
     SrcExtension = filename:extension(File),
     Basename = filename:basename(File, SrcExtension),
@@ -43,7 +35,14 @@ compile(File, Options, CacheDir) ->
         true ->
             ?INFO("Cache hit: ~p, path: ~p~n", [File, CachePath]),
             {ok, _} = file:copy(CachePath, OutPath),
-            {ok, list_to_atom(Basename)};
+
+            case filelib:is_regular(CachePath ++ ".warn") of
+                false -> {ok, list_to_atom(Basename)};
+                true ->
+                    {ok, BinWarnings} = file:read_file(CachePath ++ ".warn"),
+                    {ok, list_to_atom(Basename), binary_to_term(BinWarnings)}
+            end;
+
 
         false ->
             case compile:file(File, Options) of
@@ -52,7 +51,9 @@ compile(File, Options, CacheDir) ->
                     {ok, ModuleName};
 
                 {ok, ModuleName, Warnings} ->
+                    BinWarnings = term_to_binary(Warnings),
                     cache(CachePath, OutPath),
+                    ok = file:write_file(CachePath ++ ".warn", BinWarnings, [binary]),
                     {ok, ModuleName, Warnings};
 
                 Other -> Other
