@@ -1,3 +1,29 @@
+%% -*- erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% ex: ts=4 sw=4 et
+%% -------------------------------------------------------------------
+%%
+%% rebar: Erlang Build Tools - beamcache
+%%
+%% Copyright (c) 2015 Konrad Zemek (konrad.zemek@gmail.com)
+%%
+%% Permission is hereby granted, free of charge, to any person obtaining a copy
+%% of this software and associated documentation files (the "Software"), to deal
+%% in the Software without restriction, including without limitation the rights
+%% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+%% copies of the Software, and to permit persons to whom the Software is
+%% furnished to do so, subject to the following conditions:
+%%
+%% The above copyright notice and this permission notice shall be included in
+%% all copies or substantial portions of the Software.
+%%
+%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+%% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+%% THE SOFTWARE.
+%% -------------------------------------------------------------------
 -module(rebar_beam_cache).
 
 -include("rebar.hrl").
@@ -6,12 +32,20 @@
 
 
 compile(File, Options) ->
-    CacheDir = os:getenv("BEAM_CACHE_DIR"),
-    compile(File, Options, CacheDir).
-
-
-compile(File, Options, false = _CacheDir) ->
-    compile:file(File, Options);
+    try
+        CacheDir = os:getenv("BEAM_CACHE_DIR"),
+        OutputGenerated = compile:output_generated(Options),
+        case CacheDir =:= false orelse OutputGenerated =:= false of
+            true -> compile:file(File, Options);
+            false -> compile(File, Options, CacheDir)
+        end
+    catch
+        Error:Reason ->
+            ?WARN("Failed to use beamcache for file ~p with options ~p: ~p:~p~n",
+                  [File, Options, Error, Reason]),
+            ?WARN("~p~n", [erlang:get_stacktrace()]),
+            compile:file(File, Options)
+    end.
 
 compile(File, Options, CacheDir) ->
     FilteredOptions =
@@ -25,7 +59,8 @@ compile(File, Options, CacheDir) ->
 
     CompilerHash = base64url(CompilerVersion),
     OptionsHash = base64url(crypto:hash(md4, term_to_binary(FilteredOptions))),
-    FileHash = base64url(hash_file(File)),
+    SrcDeps = get_deps(File, Options),
+    FileHash = base64url(hash_files(SrcDeps)),
 
     CachePath = filename:join([CacheDir, CompilerHash, OptionsHash, Basename ++ FileHash]),
     OutDir = proplists:get_value(outdir, Options),
@@ -43,17 +78,18 @@ compile(File, Options, CacheDir) ->
                     {ok, list_to_atom(Basename), binary_to_term(BinWarnings)}
             end;
 
-
         false ->
             case compile:file(File, Options) of
                 {ok, ModuleName} ->
-                    cache(CachePath, OutPath),
+                    ok = filelib:ensure_dir(CachePath),
+                    {ok, _} = file:copy(OutPath, CachePath),
                     {ok, ModuleName};
 
                 {ok, ModuleName, Warnings} ->
                     BinWarnings = term_to_binary(Warnings),
-                    cache(CachePath, OutPath),
+                    ok = filelib:ensure_dir(CachePath),
                     ok = file:write_file(CachePath ++ ".warn", BinWarnings, [binary]),
+                    {ok, _} = file:copy(OutPath, CachePath),
                     {ok, ModuleName, Warnings};
 
                 Other -> Other
@@ -61,9 +97,17 @@ compile(File, Options, CacheDir) ->
     end.
 
 
-cache(CachePath, OutPath) ->
-    ok = filelib:ensure_dir(CachePath),
-    {ok, _} = file:copy(OutPath, CachePath).
+get_deps(SrcPath, CompileOpts) ->
+    CompileRes = compile:file(SrcPath, [makedep, binary | CompileOpts]),
+    case element(1, CompileRes) of
+        error ->
+            ?WARN("Couldn't list deps of ~p: ~p~n", [SrcPath, CompileRes]),
+            [SrcPath];
+        _ ->
+            [_, DepsBin] = binary:split(element(3, CompileRes), <<":">>),
+            DepsBinList = re:split(DepsBin, <<"[\\s|\\\\]+">>, [trim]),
+            [binary_to_list(D) || D <- DepsBinList, byte_size(D) > 0]
+    end.
 
 
 base64url(Bin) ->
@@ -76,18 +120,19 @@ base64url(Bin) ->
     end, Base).
 
 
-hash_file(Path) ->
+hash_files(Paths) ->
     Context = crypto:hash_init(md4),
-    {ok, File} = file:open(Path, [raw, binary, read]),
-    hash_file(File, Context).
+    hash_files(Paths, Context).
 
-hash_file(File, Context) ->
-    hash_file(File, Context, {ok, <<>>}).
-
-hash_file(File, Context, eof) ->
-    file:close(File),
+hash_files([], Context) ->
     crypto:hash_final(Context);
+hash_files([Path | Paths], Context) ->
+    {ok, File} = file:open(Path, [raw, binary, read]),
+    hash_files(File, Paths, Context, {ok, <<>>}).
 
-hash_file(File, Context, {ok, Data}) ->
+hash_files(File, Paths, Context, eof) ->
+    file:close(File),
+    hash_files(Paths, Context);
+hash_files(File, Paths, Context, {ok, Data}) ->
     NewContext = crypto:hash_update(Context, Data),
-    hash_file(File, NewContext, file:read(File, 64000)).
+    hash_files(File, Paths, NewContext, file:read(File, 64000)).
